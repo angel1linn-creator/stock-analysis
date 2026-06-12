@@ -4,9 +4,30 @@ import pandas as pd
 import datetime
 import time
 import plotly.graph_objects as go
+import json
+import os
 
 # 設定網頁標題與佈局
 st.set_page_config(page_title="台股動態即時量價分析", layout="wide")
+
+# --- 投資組合儲存邏輯 ---
+PORTFOLIO_FILE = "portfolio.json"
+
+def load_portfolio():
+    if os.path.exists(PORTFOLIO_FILE):
+        try:
+            with open(PORTFOLIO_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return ["6239", "2330"]
+    return ["6239", "2330"]
+
+def save_portfolio(portfolio):
+    with open(PORTFOLIO_FILE, "w") as f:
+        json.dump(portfolio, f)
+
+if 'portfolio' not in st.session_state:
+    st.session_state.portfolio = load_portfolio()
 
 st.title("📊 台股上市櫃股票 - 動態即時量價分析儀表板")
 st.markdown("本儀表板採用 `yfinance` 核心，並導入區域局部重繪技術，實現盤中動態即時報價。")
@@ -15,6 +36,25 @@ st.markdown("本儀表板採用 `yfinance` 核心，並導入區域局部重繪�
 st.sidebar.header("控制面板")
 stock_code = st.sidebar.text_input("請輸入台股代碼（例如：6239 或 2330）：", value="6239").strip()
 refresh_rate = st.sidebar.slider("即時報價更新頻率 (秒)", min_value=5, max_value=60, value=10)
+
+# 側邊欄：自選投資組合管理
+st.sidebar.markdown("---")
+st.sidebar.subheader("⭐ 自選投資組合管理")
+new_stock = st.sidebar.text_input("新增股票代碼:", key="new_stock_input").strip()
+if st.sidebar.button("加入組合"):
+    if new_stock and new_stock not in st.session_state.portfolio:
+        st.session_state.portfolio.append(new_stock)
+        save_portfolio(st.session_state.portfolio)
+        st.rerun()
+
+# 顯示自選股清單與刪除按鈕
+for s in st.session_state.portfolio:
+    cols = st.sidebar.columns([3, 1])
+    cols[0].write(s)
+    if cols[1].button("❌", key=f"remove_{s}"):
+        st.session_state.portfolio.remove(s)
+        save_portfolio(st.session_state.portfolio)
+        st.rerun()
 
 # 使用 Streamlit 內建快取歷史資料，TTL 設為 10 分鐘，徹底防範雲端 IP 被 Yahoo 限流
 @st.cache_data(ttl=600)
@@ -40,137 +80,186 @@ def get_historical_data(ticker_str):
     
     return hist_df, {"name": name}
 
-if stock_code:
-    # 判斷上市或上櫃後綴
-    ticker_symbol = f"{stock_code}.TW"
-    df, info_dict = get_historical_data(ticker_symbol)
-    
-    if df.empty:
-        ticker_symbol = f"{stock_code}.TWO"
+tab1, tab2 = st.tabs(["🔍 單一股票分析", "⭐ 自選組合概覽"])
+
+with tab1:
+    if stock_code:
+        # 判斷上市或上櫃後綴
+        ticker_symbol = f"{stock_code}.TW"
         df, info_dict = get_historical_data(ticker_symbol)
-        
-    if df.empty:
-        st.error(f"無法取得代碼 {stock_code} 的歷史數據，請確認代碼是否正確。")
-    else:
-        stock_name = info_dict["name"]
-        st.subheader(f"🔍 當前分析標的：{stock_code} {stock_name}")
-        
-        # ----------------------------------------------------
-        # ⚡ 動態即時股價呈現區塊 (利用 Fragment 技術進行局部重繪)
-        # ----------------------------------------------------
-        @st.fragment
-        def render_realtime_section(ticker_str, historical_df):
-            # 即時抓取最新的一筆盤中數據 (用 1m Ｋ線抓最後一分鐘)
-            try:
-                rt_stock = yf.Ticker(ticker_str)
-                rt_df = rt_stock.history(period="1d", interval="1m")
-                
-                if not rt_df.empty:
-                    latest_rt = rt_df.iloc[-1]
-                    current_price = round(latest_rt['Close'], 2)
-                    # 盤中即時累計量
-                    current_volume = int(rt_df['Volume'].sum()) 
-                else:
-                    # 若週六日或盤後沒即時1分K，則抓歷史日K最後一筆
+
+        if df.empty:
+            ticker_symbol = f"{stock_code}.TWO"
+            df, info_dict = get_historical_data(ticker_symbol)
+
+        if df.empty:
+            st.error(f"無法取得代碼 {stock_code} 的歷史數據，請確認代碼是否正確。")
+        else:
+            stock_name = info_dict["name"]
+            st.subheader(f"🔍 當前分析標的：{stock_code} {stock_name}")
+
+            # ----------------------------------------------------
+            # ⚡ 動態即時股價呈現區塊 (利用 Fragment 技術進行局部重繪)
+            # ----------------------------------------------------
+            @st.fragment(run_every=refresh_rate)
+            def render_realtime_section(ticker_str, historical_df):
+                # 即時抓取最新的一筆盤中數據 (用 1m Ｋ線抓最後一分鐘)
+                try:
+                    rt_stock = yf.Ticker(ticker_str)
+                    rt_df = rt_stock.history(period="1d", interval="1m")
+
+                    if not rt_df.empty:
+                        latest_rt = rt_df.iloc[-1]
+                        current_price = round(latest_rt['Close'], 2)
+                        # 盤中即時累計量
+                        current_volume = int(rt_df['Volume'].sum()) 
+                    else:
+                        # 若週六日或盤後沒即時1分K，則抓歷史日K最後一筆
+                        current_price = round(historical_df.iloc[-1]['Close'], 2)
+                        current_volume = int(historical_df.iloc[-1]['Volume'])
+                except:
+                    # 發生異常時降級讀取歷史暫存
                     current_price = round(historical_df.iloc[-1]['Close'], 2)
                     current_volume = int(historical_df.iloc[-1]['Volume'])
-            except:
-                # 發生異常時降級讀取歷史暫存
-                current_price = round(historical_df.iloc[-1]['Close'], 2)
-                current_volume = int(historical_df.iloc[-1]['Volume'])
 
-            # 取得前一交易日與歷史關鍵數據
-            prev_data = historical_df.iloc[-2] if len(historical_df) > 1 else historical_df.iloc[-1]
-            max_volume_row = historical_df.loc[historical_df['Volume'].idxmax()]
-            
-            prev_price = round(prev_data['Close'], 2)
-            prev_volume = int(prev_data['Volume'])
-            ma20_val = round(historical_df.iloc[-1]['MA20'], 2) if not pd.isna(historical_df.iloc[-1]['MA20']) else 0
-            
-            max_vol = int(max_volume_row['Volume'])
-            max_vol_date = max_volume_row.name.strftime('%Y-%m-%d')
-            max_vol_price = round(max_volume_row['Close'], 2)
-            
-            # 計算即時乖離率與漲跌
-            bias_ma20 = round(((current_price - ma20_val) / ma20_val) * 100, 2) if ma20_val > 0 else 0
-            price_change = round(current_price - prev_price, 2)
-            
-            # 建立即時 KPI 卡片
-            st.markdown("### ⚡ 盤中動態即時報價")
-            kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-            kpi1.metric(label="動態即時股價", value=f"${current_price} 元", delta=f"{price_change} 元")
-            kpi2.metric(label="今日累計成交量", value=f"{current_volume // 1000:,} 張" if current_volume > 1000 else f"{current_volume} 股")
-            kpi3.metric(label="20日平均線 (月線)", value=f"${ma20_val} 元", delta=f"當前乖離 {bias_ma20}%")
-            kpi4.metric(label="波段最高天量", value=f"{max_vol // 1000:,} 張", delta=f"日期: {max_vol_date}")
-            
-            # 一、 量價關係對比彙總表
-            st.markdown("### 一、 量價關係對比彙總表")
-            summary_data = {
-                "日期/項目": ["波段最高天量日", "前一交易日", "今日動態即時"],
-                "股價位置": [f"${max_vol_price} 元", f"${prev_price} 元", f"${current_price} 元"],
-                "成交量": [f"{max_vol // 1000:,} 張", f"{prev_volume // 1000:,} 張", f"{current_volume // 1000:,} 張"],
-                "盤面技術與籌碼意涵": [
-                    f"爆出近期歷史天量（{max_vol_date}），屬於多空劇烈震盪或主力強攻換手區。",
-                    "前一日量能狀態，作為今日量能是否委縮的對比基準。",
-                    "每秒動態更新之最新交易結果，呈現當前多空最新表態。"
-                ]
-            }
-            st.table(pd.DataFrame(summary_data))
-            
-            # 二、 今日「量縮」的籌碼面與操作解析
-            st.markdown("### 二、 今日「量縮」的籌碼面與操作解析")
-            is_vol_shrunk_prev = current_volume < prev_volume
-            is_vol_shrunk_max = current_volume < (max_vol * 0.4)
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("#### 🔄 即時量能對比")
-                if is_vol_shrunk_prev:
-                    st.success(f"✅ **當前成交量較前一日減少**：目前 {current_volume // 1000:,} 張 對比昨日 {prev_volume // 1000:,} 張，量能出現委縮。")
+                # 取得前一交易日與歷史關鍵數據
+                prev_data = historical_df.iloc[-2] if len(historical_df) > 1 else historical_df.iloc[-1]
+                max_volume_row = historical_df.loc[historical_df['Volume'].idxmax()]
+
+                prev_price = round(prev_data['Close'], 2)
+                prev_volume = int(prev_data['Volume'])
+                ma20_val = round(historical_df.iloc[-1]['MA20'], 2) if not pd.isna(historical_df.iloc[-1]['MA20']) else 0
+
+                max_vol = int(max_volume_row['Volume'])
+                max_vol_date = max_volume_row.name.strftime('%Y-%m-%d')
+                max_vol_price = round(max_volume_row['Close'], 2)
+
+                # 計算即時乖離率與漲跌
+                bias_ma20 = round(((current_price - ma20_val) / ma20_val) * 100, 2) if ma20_val > 0 else 0
+                price_change = round(current_price - prev_price, 2)
+
+                # 建立即時 KPI 卡片
+                st.markdown("### ⚡ 盤中動態即時報價")
+                kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+                kpi1.metric(label="動態即時股價", value=f"${current_price} 元", delta=f"{price_change} 元")
+                kpi2.metric(label="今日累計成交量", value=f"{current_volume // 1000:,} 張" if current_volume > 1000 else f"{current_volume} 股")
+                kpi3.metric(label="20日平均線 (月線)", value=f"${ma20_val} 元", delta=f"當前乖離 {bias_ma20}%")
+                kpi4.metric(label="波段最高天量", value=f"{max_vol // 1000:,} 張", delta=f"日期: {max_vol_date}")
+
+                # 一、 量價關係對比彙總表
+                st.markdown("### 一、 量價關係對比彙總表")
+                summary_data = {
+                    "日期/項目": ["波段最高天量日", "前一交易日", "今日動態即時"],
+                    "股價位置": [f"${max_vol_price} 元", f"${prev_price} 元", f"${current_price} 元"],
+                    "成交量": [f"{max_vol // 1000:,} 張", f"{prev_volume // 1000:,} 張", f"{current_volume // 1000:,} 張"],
+                    "盤面技術與籌碼意涵": [
+                        f"爆出近期歷史天量（{max_vol_date}），屬於多空劇烈震盪或主力強攻換手區。",
+                        "前一日量能狀態，作為今日量能是否委縮的對比基準。",
+                        "每秒動態更新之最新交易結果，呈現當前多空最新表態。"
+                    ]
+                }
+                st.table(pd.DataFrame(summary_data))
+
+                # 二、 今日「量縮」的籌碼面與操作解析
+                st.markdown("### 二、 今日「量縮」的籌碼面與操作解析")
+                is_vol_shrunk_prev = current_volume < prev_volume
+                is_vol_shrunk_max = current_volume < (max_vol * 0.4)
+
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown("#### 🔄 即時量能對比")
+                    if is_vol_shrunk_prev:
+                        st.success(f"✅ **當前成交量較前一日減少**：目前 {current_volume // 1000:,} 張 對比昨日 {prev_volume // 1000:,} 張，量能出現委縮。")
+                    else:
+                        st.warning(f"⚠️ **當前成交量較前一日放大**：目前 {current_volume // 1000:,} 張 對比昨日 {prev_volume // 1000:,} 張，短線動能仍在釋放。")
+
+                    if is_vol_shrunk_max:
+                        st.info(f"❄️ **量能極度急凍**：當前量能不達最高天量的四成，短線熱錢、當沖與隔日沖資金出現明顯撤離。")
+
+                with col2:
+                    st.markdown("#### 🧠 即時籌碼面解讀")
+                    if current_price >= prev_price and is_vol_shrunk_prev:
+                        st.markdown("> **量縮橫盤/小漲：** 高檔追高意願降低，但**無恐慌性賣壓**（良性量縮），籌碼正處於沈澱期。")
+                    elif current_price < prev_price and is_vol_shrunk_prev:
+                        st.markdown("> **量縮下跌：** 多頭架構下的良性拉回。技術面尚未爆量踩踏，主力並未不計代價出貨。")
+                    else:
+                        st.markdown("> **帶量震盪：** 盤面震盪幅度與量能同步放大，多空雙方在此價格區間仍有分歧。")
+
+                # 三、 綜合結論：今天適合進場嗎？
+                st.markdown("### 三、 綜合結論：今天適合進場嗎？")
+                if bias_ma20 > 15:
+                    st.error(f"🚨 **策略建議：目前「極度不適合」盲目追高。** 目前股價距離月線存在高達 **{bias_ma20}%** 的巨大正乖離，隨時有修正引力。建議等股價與月線距離縮小至 5-10% 內再行切入。")
+                elif bias_ma20 > 0 and bias_ma20 <= 15:
+                    st.warning(f"⚖️ **策略建議：適合「小量試單」或「分批逢低布局」。** 股價在月線之上，多頭架構不變，且乖離率已修正至相對安全範圍，配合量縮是標準的拉回找買點。")
                 else:
-                    st.warning(f"⚠️ **當前成交量較前一日放大**：目前 {current_volume // 1000:,} 張 對比昨日 {prev_volume // 1000:,} 張，短線動能仍在釋放。")
-                    
-                if is_vol_shrunk_max:
-                    st.info(f"❄️ **量能極度急凍**：當前量能不達最高天量的四成，短線熱錢、當沖與隔日沖資金出現明顯撤離。")
-            
-            with col2:
-                st.markdown("#### 🧠 即時籌碼面解讀")
-                if current_price >= prev_price and is_vol_shrunk_prev:
-                    st.markdown("> **量縮橫盤/小漲：** 高檔追高意願降低，但**無恐慌性賣壓**（良性量縮），籌碼正處於沈澱期。")
-                elif current_price < prev_price and is_vol_shrunk_prev:
-                    st.markdown("> **量縮下跌：** 多頭架構下的良性拉回。技術面尚未爆量踩踏，主力並未不計代價出貨。")
-                else:
-                    st.markdown("> **帶量震盪：** 盤面震盪幅度與量能同步放大，多空雙方在此價格區間仍有分歧。")
+                    st.info(f"📉 **策略建議：股價已跌破月線。** 短線趨勢偏弱，建議不要伸手接刀，等待成交量出現連續 2-3 天的「極度窒息量」再考慮波段切入。")
 
-            # 三、 綜合結論：今天適合進場嗎？
-            st.markdown("### 三、 綜合結論：今天適合進場嗎？")
-            if bias_ma20 > 15:
-                st.error(f"🚨 **策略建議：目前「極度不適合」盲目追高。** 目前股價距離月線存在高達 **{bias_ma20}%** 的巨大正乖離，隨時有修正引力。建議等股價與月線距離縮小至 5-10% 內再行切入。")
-            elif bias_ma20 > 0 and bias_ma20 <= 15:
-                st.warning(f"⚖️ **策略建議：適合「小量試單」或「分批逢低布局」。** 股價在月線之上，多頭架構不變，且乖離率已修正至相對安全範圍，配合量縮是標準的拉回找買點。")
-            else:
-                st.info(f"📉 **策略建議：股價已跌破月線。** 短線趨勢偏弱，建議不要伸手接刀，等待成交量出現連續 2-3 天的「極度窒息量」再考慮波段切入。")
+                # 倒數計時顯示
+                st.caption(f"🔄 儀表板正在自動重新整理中... (頻率: {refresh_rate}s) 最新同步時間：{datetime.datetime.now().strftime('%H:%M:%S')}")
 
-            # 倒數計時並自動觸發局部重繪
-            st.caption(f"🔄 儀表板將在 {refresh_rate} 秒後自動重新整理... 最新同步時間：{datetime.datetime.now().strftime('%H:%M:%S')}")
-            time.sleep(refresh_rate)
-            st.rerun()
+            # 執行即時呈現區塊
+            render_realtime_section(ticker_symbol, df)
 
-        # 執行即時呈現區塊
-        render_realtime_section(ticker_symbol, df)
-        
-        st.markdown("---")
-        
-        # 💡 四、 歷史走勢圖（此區塊不會隨著每秒即時更新而閃爍，維持使用者體驗）
-        st.markdown("### 📈 歷史K線與中長期均線走勢圖 (每10分鐘後台更新)")
-        ma5_val_h = round(df.iloc[-1]['MA5'], 2) if not pd.isna(df.iloc[-1]['MA5']) else "計算中"
-        ma20_val_h = round(df.iloc[-1]['MA20'], 2) if not pd.isna(df.iloc[-1]['MA20']) else "計算中"
-        ma60_val_h = round(df.iloc[-1]['MA60'], 2) if not pd.isna(df.iloc[-1]['MA60']) else "計算中"
-        
-        fig = go.Figure()
-        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='日K線'))
-        if not isinstance(ma5_val_h, str): fig.add_trace(go.Scatter(x=df.index, y=df['MA5'], line=dict(color='orange', width=1.5), name='5日線'))
-        if not isinstance(ma20_val_h, str): fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='magenta', width=2), name='月線(20MA)'))
-        if not isinstance(ma60_val_h, str): fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='cyan', width=2), name='季線(60MA)'))
-        fig.update_layout(xaxis_rangeslider_visible=False, height=450, margin=dict(l=20, r=20, t=20, b=20))
-        st.plotly_chart(fig, use_container_width=True)
+            st.markdown("---")
+
+            # 💡 四、 歷史走勢圖（此區塊不會隨著每秒即時更新而閃爍，維持使用者體驗）
+            st.markdown("### 📈 歷史K線與中長期均線走勢圖 (每10分鐘後台更新)")
+            ma5_val_h = round(df.iloc[-1]['MA5'], 2) if not pd.isna(df.iloc[-1]['MA5']) else "計算中"
+            ma20_val_h = round(df.iloc[-1]['MA20'], 2) if not pd.isna(df.iloc[-1]['MA20']) else "計算中"
+            ma60_val_h = round(df.iloc[-1]['MA60'], 2) if not pd.isna(df.iloc[-1]['MA60']) else "計算中"
+
+            fig = go.Figure()
+            fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='日K線'))
+            if not isinstance(ma5_val_h, str): fig.add_trace(go.Scatter(x=df.index, y=df['MA5'], line=dict(color='orange', width=1.5), name='5日線'))
+            if not isinstance(ma20_val_h, str): fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='magenta', width=2), name='月線(20MA)'))
+            if not isinstance(ma60_val_h, str): fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='cyan', width=2), name='季線(60MA)'))
+            fig.update_layout(xaxis_rangeslider_visible=False, height=450, margin=dict(l=20, r=20, t=20, b=20))
+            st.plotly_chart(fig, use_container_width=True)
+
+with tab2:
+    st.subheader("⭐ 自選組合即時概覽")
+    if not st.session_state.portfolio:
+        st.info("目前自選組合為空，請從側邊欄加入股票。")
+    else:
+        @st.fragment(run_every=refresh_rate)
+        def render_portfolio_overview():
+            portfolio_results = []
+            for code in st.session_state.portfolio:
+                # 簡單抓取最新資訊
+                try:
+                    # 先試 TW
+                    t_symbol = f"{code}.TW"
+                    t_obj = yf.Ticker(t_symbol)
+                    t_hist = t_obj.history(period="2d")
+                    if t_hist.empty:
+                        # 再試 TWO
+                        t_symbol = f"{code}.TWO"
+                        t_obj = yf.Ticker(t_symbol)
+                        t_hist = t_obj.history(period="2d")
+
+                    if not t_hist.empty:
+                        curr_p = round(t_hist.iloc[-1]['Close'], 2)
+                        prev_p = round(t_hist.iloc[-2]['Close'], 2) if len(t_hist) > 1 else curr_p
+                        chg = round(curr_p - prev_p, 2)
+                        chg_pct = round((chg / prev_p) * 100, 2) if prev_p != 0 else 0
+                        vol = int(t_hist.iloc[-1]['Volume'])
+
+                        portfolio_results.append({
+                            "代碼": code,
+                            "現價": f"{curr_p}",
+                            "漲跌": f"{chg} ({chg_pct}%)",
+                            "成交量": f"{vol // 1000:,} 張" if vol > 1000 else f"{vol} 股"
+                        })
+                    else:
+                        portfolio_results.append({
+                            "代碼": code, "現價": "N/A", "漲跌": "N/A", "成交量": "N/A"
+                        })
+                except:
+                    portfolio_results.append({
+                        "代碼": code, "現價": "Error", "漲跌": "Error", "成交量": "Error"
+                    })
+
+            st.table(pd.DataFrame(portfolio_results))
+            st.caption(f"🔄 自選組合自動更新中... (頻率: {refresh_rate}s) 最新同步時間：{datetime.datetime.now().strftime('%H:%M:%S')}")
+
+        render_portfolio_overview()
