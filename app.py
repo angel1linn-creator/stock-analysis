@@ -10,32 +10,169 @@ import os
 # 設定網頁標題與佈局
 st.set_page_config(page_title="台股動態即時量價與融資籌碼分析儀表板", layout="wide")
 
-# --- 投資組合儲存邏輯 ---
+# ==============================================================================
+# 完整台股對應美股 ADR / OTC / GDR 股票對照表 (完整清單)
+# ==============================================================================
+TAIWAN_ADR_MAP = {
+    # --- 1. 美股主要交易所上市 ADR (NYSE / NASDAQ) ---
+    "2330": "TSM",     # 台積電 (TSMC) - NYSE
+    "3711": "ASX",     # 日月光投控 (ASE Technology) - NYSE
+    "2303": "UMC",     # 聯電 (UMC) - NYSE
+    "2412": "CHT",     # 中華電信 (Chunghwa Telecom) - NYSE
+    "8150": "IMOS",    # 南茂 (ChipMOS) - NASDAQ
+
+    # --- 2. 美股 OTC / Pink Sheets / 級別一 ADR & GDR (電子/半導體) ---
+    "2317": "HNHPF",   # 鴻海 (Hon Hai / Foxconn)
+    "2454": "MDTKF",   # 聯發科 (MediaTek)
+    "2308": "DLEFY",   # 台達電 (Delta Electronics)
+    "2409": "AUOTY",   # 友達 (AUO)
+    "3481": "INNMF",   # 群創 (Innolux)
+    "2382": "QUCCY",   # 廣達 (Quanta Computer)
+    "2357": "ASUUY",   # 華碩 (ASUS)
+    "3008": "LRGNY",   # 大立光 (Largan Precision)
+    "2379": "RERKY",   # 瑞昱 (Realtek)
+    "2301": "LTOOY",   # 光寶科 (Lite-On)
+    "2327": "YAGYY",   # 國巨 (Yageo)
+    "2395": "ADEVF",   # 研華 (Advantech)
+    "3231": "WSTRF",   # 緯創 (Wistron)
+    "6669": "WIWNF",   # 緯穎 (Wiwynn)
+    "2377": "MLLOF",   # 微星 (MSI)
+    "2376": "GIGAF",   # 技嘉 (Gigabyte)
+    "2345": "ACTOF",   # 智邦 (Accton)
+    "2383": "TGMKF",   # 台光電 (EMC)
+    "3034": "NVVTF",   # 聯詠 (Novatek)
+    "2337": "MXICY",   # 旺宏 (Macronix)
+    "2344": "WSTOF",   # 華邦電 (Winbond)
+
+    # --- 3. 金控股族群 (Financials) ---
+    "2881": "FBNGY",   # 富邦金 (Fubon Financial)
+    "2882": "CSGKY",   # 國泰金 (Cathay Financial)
+    "2886": "MGAFY",   # 兆豐金 (Mega Financial)
+    "2891": "CTBCY",   # 中信金 (CTBC Financial)
+
+    # --- 4. 傳產與台塑集團 (Traditional Industry / Formosa Group) ---
+    "2002": "CISGY",   # 中鋼 (China Steel)
+    "1301": "FAPLY",   # 台塑 (Formosa Plastics)
+    "1303": "NNYAY",   # 南亞 (Nan Ya Plastics)
+    "1326": "FCCFY",   # 台化 (Formosa Chemicals)
+    "6505": "FOPOY",   # 台塑化 (Formosa Petrochemical)
+}
+
+# ==============================================================================
+# 自選投資組合持久化儲存邏輯 (JSON 檔案連動)
+# ==============================================================================
 PORTFOLIO_FILE = "portfolio.json"
 
 def load_portfolio():
+    """讀取本地儲存的自選股清單"""
     if os.path.exists(PORTFOLIO_FILE):
         try:
-            with open(PORTFOLIO_FILE, "r") as f:
-                return json.load(f)
-        except:
-            return ["6239", "2330"]
-    return ["6239", "2330"]
+            with open(PORTFOLIO_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list) and len(data) > 0:
+                    return data
+        except Exception:
+            pass
+    return ["6239", "2303", "2330"]
 
 def save_portfolio(portfolio):
-    with open(PORTFOLIO_FILE, "w") as f:
-        json.dump(portfolio, f)
+    """將最新的自選股清單寫入本地 JSON 檔案"""
+    try:
+        with open(PORTFOLIO_FILE, "w", encoding="utf-8") as f:
+            json.dump(portfolio, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        st.sidebar.error(f"儲存自選清單失敗: {e}")
 
 if 'portfolio' not in st.session_state:
     st.session_state.portfolio = load_portfolio()
 
+# ==============================================================================
+# 財報數據檢索 Helper 函式 (銀行存款與公司債/借款餘額)
+# ==============================================================================
+@st.cache_data(ttl=3600)  # 財報資料 1 小時快取，避免重複請求
+def get_financial_balances(ticker_str):
+    """取得最近一期銀行存款餘額與總借款/公司債餘額"""
+    cash_str, debt_str = "N/A", "N/A"
+    try:
+        t_obj = yf.Ticker(ticker_str)
+        info = t_obj.info
+        
+        cash = info.get('totalCash')
+        debt = info.get('totalDebt')
+        
+        # 若 info 未直接回傳，由季度資產負債表進行備援抓取
+        if cash is None or debt is None:
+            bs = t_obj.quarterly_balance_sheet
+            if bs is not None and not bs.empty:
+                if cash is None:
+                    for k in ['Cash Cash Equivalents And Short Term Investments', 'Cash And Cash Equivalents']:
+                        if k in bs.index:
+                            cash = bs.loc[k].iloc[0]
+                            break
+                if debt is None:
+                    for k in ['Total Debt', 'Long Term Debt And Capital Lease Obligation', 'Total Liabilities Net Minor Interest']:
+                        if k in bs.index:
+                            debt = bs.loc[k].iloc[0]
+                            break
+
+        # 數值格式化轉換 (億元/萬元)
+        if cash is not None and not pd.isna(cash):
+            c_val = float(cash)
+            if c_val >= 1e8:
+                cash_str = f"${c_val / 1e8:.2f} 億"
+            else:
+                cash_str = f"${c_val / 1e4:,.0f} 萬"
+
+        if debt is not None and not pd.isna(debt):
+            d_val = float(debt)
+            if d_val >= 1e8:
+                debt_str = f"${d_val / 1e8:.2f} 億"
+            else:
+                debt_str = f"${d_val / 1e4:,.0f} 萬"
+
+    except Exception:
+        pass
+
+    return cash_str, debt_str
+
+# ==============================================================================
+# 美股 ADR 數據動態檢索函式
+# ==============================================================================
+@st.cache_data(ttl=1800)
+def check_and_get_adr_info(stock_code):
+    clean_code = str(stock_code).strip()
+    adr_ticker = TAIWAN_ADR_MAP.get(clean_code)
+    
+    if not adr_ticker:
+        return None
+    
+    try:
+        adr_obj = yf.Ticker(adr_ticker)
+        hist = adr_obj.history(period="5d")
+        
+        if len(hist) >= 2:
+            curr_price = hist.iloc[-1]['Close']
+            prev_price = hist.iloc[-2]['Close']
+            
+            if prev_price > 0:
+                change_pct = round(((curr_price - prev_price) / prev_price) * 100, 2)
+                return {
+                    "adr_ticker": adr_ticker,
+                    "price": round(curr_price, 2),
+                    "change_pct": change_pct
+                }
+    except Exception:
+        pass
+        
+    return None
+
 st.title("📊 台股上市櫃股票 - 動態即時量價與融資籌碼分析儀表板")
-st.markdown("本儀表板結合 `yfinance` 報價、**價量關係**與**融資融券籌碼結構**，即時診斷市場籌碼沉澱度、軋空潛力與融資斷頭風險。")
+st.markdown("本儀表板結合 `yfinance` 報價、**價量關係**、**美股 ADR 連動**與**融資融券籌碼結構**，即時診斷市場籌碼沉澱度、軋空潛力與融資斷頭風險。")
 
 # 側邊欄：使用者輸入代碼與籌碼設定
 st.sidebar.header("🎛️ 控制面板")
-stock_code = st.sidebar.text_input("請輸入台股代碼（例如：6239 或 2330）：", value="6239").strip()
-refresh_rate = st.sidebar.slider("即時報價更新頻率 (秒)", min_value=5, max_value=60, value=10)
+stock_code = st.sidebar.text_input("請輸入台股代碼（例如：3711 或 2330）：", value="3711").strip()
+refresh_rate = st.sidebar.slider("即時報價更新頻率 (秒)", min_value=5, max_value=60, value=30)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("⚙️ 融資與籌碼動態模擬參數")
@@ -47,10 +184,11 @@ short_ratio_level = st.sidebar.select_slider("當前券資比程度 (觀察軋�
 st.sidebar.markdown("---")
 st.sidebar.subheader("⭐ 自選投資組合管理")
 new_stock = st.sidebar.text_input("新增股票代碼:", key="new_stock_input").strip()
+
 if st.sidebar.button("加入組合"):
     if new_stock and new_stock not in st.session_state.portfolio:
         st.session_state.portfolio.append(new_stock)
-        save_portfolio(st.session_state.portfolio)
+        save_portfolio(st.session_state.portfolio)  # 寫入 JSON 持久化
         st.rerun()
 
 # 顯示自選股清單與刪除按鈕
@@ -59,15 +197,14 @@ for s in st.session_state.portfolio:
     cols[0].write(s)
     if cols[1].button("❌", key=f"remove_{s}"):
         st.session_state.portfolio.remove(s)
-        save_portfolio(st.session_state.portfolio)
+        save_portfolio(st.session_state.portfolio)  # 寫入 JSON 持久化
         st.rerun()
 
-# 使用 Streamlit 內建快取歷史資料，TTL 設為 10 分鐘，防範被限流
 @st.cache_data(ttl=600)
 def get_historical_data(ticker_str):
     tz = datetime.timezone(datetime.timedelta(hours=8))
     end_dt = datetime.datetime.now(tz)
-    start_dt = end_dt - datetime.timedelta(days=120)  # 確保有足夠天數算出 MA60
+    start_dt = end_dt - datetime.timedelta(days=120)
     
     stock_obj = yf.Ticker(ticker_str)
     hist_df = stock_obj.history(start=start_dt.strftime('%Y-%m-%d'), end=(end_dt + datetime.timedelta(days=1)).strftime('%Y-%m-%d'))
@@ -75,7 +212,6 @@ def get_historical_data(ticker_str):
     if hist_df.empty:
         return pd.DataFrame(), {}
         
-    # 計算技術指標
     hist_df['MA5'] = hist_df['Close'].rolling(window=5).mean()
     hist_df['MA20'] = hist_df['Close'].rolling(window=20).mean()
     hist_df['MA60'] = hist_df['Close'].rolling(window=60).mean()
@@ -85,87 +221,25 @@ def get_historical_data(ticker_str):
     
     return hist_df, {"name": name}
 
-# 12種價/量/融資綜合情境診斷矩陣數據庫
 SCENARIO_MATRIX = {
-    ('Up', 'High', 'Up'): {
-        "title": "🔥 高檔過熱 / 散戶追高",
-        "risk": "中高風險",
-        "color": "warning",
-        "desc": "股價上漲且成交量放大，但融資同步大幅增加，代表散戶與槓桿資金瘋狂追高。籌碼趨於凌亂，若遭遇突發利空容易引發高檔獲利了結賣壓。"
-    },
-    ('Up', 'High', 'Down'): {
-        "title": "🚀 健康多頭 / 主力強勢吸籌",
-        "risk": "低~中風險",
-        "color": "success",
-        "desc": "價漲量增且融資持續減少，屬於最健康的『法人/主力吸籌』格局！浮動籌碼被清洗乾淨，散戶退場，股價由聰明錢（Smart Money）推升，續漲動能強勁。"
-    },
-    ('Up', 'Low', 'Up'): {
-        "title": "⚠️ 虛漲背離 / 槓桿硬推",
-        "risk": "中高風險",
-        "color": "warning",
-        "desc": "成交量並未放大，股價卻靠融資槓桿推升，呈現『價量背離』。缺乏實體資金支撐，容易形成假突破，追高需極度謹慎。"
-    },
-    ('Up', 'Low', 'Down'): {
-        "title": "🌱 溫和整理上攻 / 籌碼安定",
-        "risk": "低風險",
-        "color": "success",
-        "desc": "股價小幅推升，量能溫和，融資同步下降。代表無散戶浮躁追高，籌碼高度安定，屬於波段多頭中的健康休整期。"
-    },
-    ('Flat', 'High', 'Up'): {
-        "title": "🧱 高檔出貨 / 多空劇烈分歧",
-        "risk": "高風險",
-        "color": "error",
-        "desc": "股價滯漲盤整，但爆出巨量且融資大增。暗示主力正利用高檔交投熱絡大量拋售籌碼給散戶接盤，容易形成中期頭部。"
-    },
-    ('Flat', 'High', 'Down'): {
-        "title": "🧲 籌碼洗盤換手 / 大戶逢低承接",
-        "risk": "低風險",
-        "color": "info",
-        "desc": "股價平盤整理，帶量但融資顯著減少。代表散戶失去耐心停損出場，而大戶與法人則在盤下靜靜接走籌碼，利於後續築底完成。"
-    },
-    ('Flat', 'Low', 'Up'): {
-        "title": "🫧 虛浮盤整 / 零星槓桿",
-        "risk": "中度風險",
-        "color": "warning",
-        "desc": "市場交投清淡，股價無明確方向，但融資微幅爬升。顯示市場缺乏法人關注，僅剩少量散戶用槓桿博弈，走勢易受大盤拖累。"
-    },
-    ('Flat', 'Low', 'Down'): {
-        "title": "💤 窒息沉澱 / 完全觀望",
-        "risk": "低風險",
-        "color": "info",
-        "desc": "量能急凍、融資持續遞減，市場陷入極度冷清。這通常是籌碼落底前夕的『窒息量』特徵，待新買盤進駐即有反彈機會。"
-    },
-    ('Down', 'High', 'Up'): {
-        "title": "🚨 極度危險 / 融資死摳與斷頭高危區",
-        "risk": "極高風險",
-        "color": "error",
-        "desc": "股價重挫且帶量，融資卻不減反增！代表散戶不斷逢低『攤平』接刀。若股價繼續下探，將觸發融資維持率不足（Margin Call），引發連環斷頭踩踏賣壓！"
-    },
-    ('Down', 'High', 'Down'): {
-        "title": "💥 恐慌殺多 / 斷頭洗盤築底",
-        "risk": "中度風險（迎向築底）",
-        "color": "warning",
-        "desc": "帶量下殺且融資出現暴減，代表市場出現恐慌性停損與融資斷頭潮。雖然短線陣痛劇烈，但籌碼清洗最徹底，歷史上常是中長期落底訊號。"
-    },
-    ('Down', 'Low', 'Up'): {
-        "title": "🩸 無量陰跌 / 槓桿套牢",
-        "risk": "高風險",
-        "color": "error",
-        "desc": "成交量低迷，股價緩步陰跌，但融資並未退場。市場缺乏接盤買盤，籌碼持續被套牢，走勢極為孱弱。"
-    },
-    ('Down', 'Low', 'Down'): {
-        "title": "📉 順勢陰跌整理 / 靜待止跌",
-        "risk": "中高風險",
-        "color": "warning",
-        "desc": "無量下跌且融資同步退場，屬於散戶落跑、法人觀望的自然修正期。雖然無大爆量殺多風險，但仍需等待止跌訊號出現。"
-    }
+    ('Up', 'High', 'Up'): {"title": "🔥 高檔過熱 / 散戶追高", "risk": "中高風險", "color": "warning", "desc": "股價上漲且成交量放大，但融資同步大幅增加，代表散戶與槓桿資金瘋狂追高。籌碼趨於凌亂，若遭遇突發利空容易引發高檔獲利了結賣壓。"},
+    ('Up', 'High', 'Down'): {"title": "🚀 健康多頭 / 主力強勢吸籌", "risk": "低~中風險", "color": "success", "desc": "價漲量增且融資持續減少，屬於最健康的『法人/主力吸籌』格局！浮動籌碼被清洗乾淨，散戶退場，股價由聰明錢（Smart Money）推升，續漲動能強勁。"},
+    ('Up', 'Low', 'Up'): {"title": "⚠️ 虛漲背離 / 槓桿硬推", "risk": "中高風險", "color": "warning", "desc": "成交量並未放大，股價卻靠融資槓桿推升，呈現『價量背離』。缺乏實體資金支撐，容易形成假突破，追高需極度謹慎。"},
+    ('Up', 'Low', 'Down'): {"title": "🌱 溫和整理上攻 / 籌碼安定", "risk": "低風險", "color": "success", "desc": "股價小幅推升，量能溫和，融資同步下降。代表無散戶浮躁追高，籌碼高度安定，屬於波段多頭中的健康休整期。"},
+    ('Flat', 'High', 'Up'): {"title": "🧱 高檔出貨 / 多空劇烈分歧", "risk": "高風險", "color": "error", "desc": "股價滯漲盤整，但爆出巨量且融資大增。暗示主力正利用高檔交投熱絡大量拋售籌碼給散戶接盤，容易形成中期頭部。"},
+    ('Flat', 'High', 'Down'): {"title": "🧲 籌碼洗盤換手 / 大戶逢低承接", "risk": "低風險", "color": "info", "desc": "股價平盤整理，帶量但融資顯著減少。代表散戶失去耐心停損出場，而大戶與法人則在盤下靜靜接走籌碼，利於後續築底完成。"},
+    ('Flat', 'Low', 'Up'): {"title": "🫧 虛浮盤整 / 零星槓桿", "risk": "中度風險", "color": "warning", "desc": "市場交投清淡，股價無明確方向，但融資微幅爬升。顯示市場缺乏法人關注，僅剩少量散戶用槓桿博弈，走勢易受大盤拖累。"},
+    ('Flat', 'Low', 'Down'): {"title": "💤 窒息沉澱 / 完全觀望", "risk": "低風險", "color": "info", "desc": "量能急凍、融資持續遞減，市場陷入極度冷清。這通常是籌碼落底前夕的『窒息量』特徵，待新買盤進駐即有反彈機會。"},
+    ('Down', 'High', 'Up'): {"title": "🚨 極度危險 / 融資死摳與斷頭高危區", "risk": "極高風險", "color": "error", "desc": "股價重挫且帶量，融資卻不減反增！代表散戶不斷逢低『攤平』接刀。若股價繼續下探，將觸發融資維持率不足（Margin Call），引發連環斷頭踩踏賣壓！"},
+    ('Down', 'High', 'Down'): {"title": "💥 恐慌殺多 / 斷頭洗盤築底", "risk": "中度風險（迎向築底）", "color": "warning", "desc": "帶量下殺且融資出現暴減，代表市場出現恐慌性停損與融資斷頭潮。雖然短線陣痛劇烈，但籌碼清洗最徹底，歷史上常是中長期落底訊號。"},
+    ('Down', 'Low', 'Up'): {"title": "🩸 無量陰跌 / 槓桿套牢", "risk": "高風險", "color": "error", "desc": "成交量低迷，股價緩步陰跌，但融資並未退場。市場缺乏接盤買盤，籌碼持續被套牢，走勢極為孱弱。"},
+    ('Down', 'Low', 'Down'): {"title": "📉 順勢陰跌整理 / 靜待止跌", "risk": "中高風險", "color": "warning", "desc": "無量下跌且融資同步退場，屬於散戶落跑、法人觀望的自然修正期。雖然無大爆量殺多風險，但仍需等待止跌訊號出現。"}
 }
 
 tab1, tab2 = st.tabs(["🔍 單一股票與籌碼矩陣分析", "⭐ 自選組合即時概覽"])
 
 with tab1:
     if stock_code:
-        # 判斷上市 (.TW) 或上櫃 (.TWO)
         ticker_symbol = f"{stock_code}.TW"
         df, info_dict = get_historical_data(ticker_symbol)
 
@@ -179,11 +253,8 @@ with tab1:
             stock_name = info_dict["name"]
             st.subheader(f"🔍 當前分析標的：{stock_code} {stock_name}")
 
-            # ----------------------------------------------------
-            # ⚡ 動態即時股價與籌碼呈現區塊 (利用 Fragment 技術進行局部重繪)
-            # ----------------------------------------------------
             @st.fragment(run_every=refresh_rate)
-            def render_realtime_section(ticker_str, historical_df):
+            def render_realtime_section(ticker_str, historical_df, target_code):
                 try:
                     rt_stock = yf.Ticker(ticker_str)
                     rt_df = rt_stock.history(period="1d", interval="1m")
@@ -213,26 +284,47 @@ with tab1:
                 bias_ma20 = round(((current_price - ma20_val) / ma20_val) * 100, 2) if ma20_val > 0 else 0
                 price_change = round(current_price - prev_price, 2)
 
-                # 即時 KPI 卡片
                 st.markdown("### ⚡ 盤中即時價量與籌碼概況")
                 kpi1, kpi2, kpi3, kpi4 = st.columns(4)
                 kpi1.metric(label="即時成交價", value=f"${current_price} 元", delta=f"{price_change} 元")
                 kpi2.metric(label="今日累計成交量", value=f"{current_volume // 1000:,} 張" if current_volume > 1000 else f"{current_volume} 股")
                 kpi3.metric(label="20日月線 (MA20)", value=f"${ma20_val} 元", delta=f"月線乖離率 {bias_ma20}%")
                 
-                # 計算融資與籌碼趨勢鍵值
                 p_trend = "Up" if current_price > prev_price else ("Down" if current_price < prev_price else "Flat")
                 v_trend = "High" if current_volume >= prev_volume else "Low"
                 m_trend = "Up" if "增加" in margin_trend else "Down"
 
                 diag_key = (p_trend, v_trend, m_trend)
-                diag_info = SCENARIO_MATRIX.get(diag_key, {
-                    "title": "綜合評估中", "risk": "中等", "color": "info", "desc": "資料更新中..."
-                })
+                diag_info = SCENARIO_MATRIX.get(diag_key, {"title": "綜合評估中", "risk": "中等", "color": "info", "desc": "資料更新中..."})
 
                 kpi4.metric(label="籌碼與技術診斷", value=diag_info["title"].split(' ')[1] if ' ' in diag_info["title"] else diag_info["title"], delta=f"風險評估: {diag_info['risk']}")
 
-                # 一、 量價與籌碼關係對比表
+                # 美股 ADR 連動
+                adr_info = check_and_get_adr_info(target_code)
+                st.markdown("### 🌐 美股 ADR 隔夜連動性預警")
+                
+                if adr_info is not None:
+                    adr_symbol = adr_info["adr_ticker"]
+                    adr_price = adr_info["price"]
+                    adr_chg = adr_info["change_pct"]
+                    
+                    col_adr1, col_adr2 = st.columns([1, 2])
+                    col_adr1.metric(label=f"對應美股 ADR ({adr_symbol})", value=f"${adr_price} USD", delta=f"{adr_chg}% (隔夜收盤)")
+                    
+                    with col_adr2:
+                        if adr_chg <= -2.0:
+                            st.error(f"🚨 **開盤利空預警**：隔夜美股 ADR ({adr_symbol}) 重挫 **{adr_chg}%**！今日開盤易承受賣壓，建議暫緩逢低接刀。")
+                        elif adr_chg >= 2.0:
+                            st.success(f"🚀 **開盤利多激勵**：隔夜美股 ADR ({adr_symbol}) 大漲 **+{adr_chg}%**，開盤具備向上跳空動能。")
+                        else:
+                            st.info(f"🔹 **平溫觀望**：隔夜美股 ADR ({adr_symbol}) 變動幅度和緩 ({adr_chg}%)，受美股干擾較低。")
+                else:
+                    st.markdown("""
+                        <div style="background-color: rgba(240, 242, 246, 0.6); padding: 10px 15px; border-radius: 6px; color: #555; margin-bottom: 15px;">
+                            🔹 <b>美股 ADR 狀態</b>：<code style="color: #777;">null</code>（該股票未在美股發行 ADR / OTC 證券，無跨市場開盤干擾因素）
+                        </div>
+                    """, unsafe_allow_html=True)
+
                 st.markdown("### 一、 量價與融資籌碼指標對比表")
                 summary_data = {
                     "觀察指標 / 項目": ["波段最高天量日", "前一交易日", "今日即時與籌碼趨勢"],
@@ -246,9 +338,7 @@ with tab1:
                 }
                 st.table(pd.DataFrame(summary_data))
 
-                # 二、 融資籌碼與價量綜合診斷矩陣 (核心新增區塊)
                 st.markdown("### 二、 融資籌碼與價量綜合診斷矩陣")
-                
                 diag_card_style = {
                     "success": "background-color: rgba(14, 188, 95, 0.1); border-left: 5px solid #0ebc5f; padding: 15px; border-radius: 8px;",
                     "warning": "background-color: rgba(255, 219, 15, 0.1); border-left: 5px solid #e6b800; padding: 15px; border-radius: 8px;",
@@ -265,7 +355,6 @@ with tab1:
 
                 st.markdown("<br>", unsafe_allow_html=True)
                 
-                # 籌碼面進階三大觀察重點
                 col_a, col_b, col_c = st.columns(3)
                 with col_a:
                     st.markdown("#### 1. 籌碼穩定度（籌碼集中度）")
@@ -281,7 +370,7 @@ with tab1:
                     if p_trend == "Down" and m_trend == "Up":
                         st.error("🚨 **高危斷頭預警**：股價下跌但融資持續增加，散戶逢低接刀套牢，極易誘發融資維持率低於 130% 之斷頭賣壓！")
                     elif p_trend == "Down" and v_trend == "High" and m_trend == "Down":
-                        st.warning("⚡ **恐慌斷頭宣洩中**：融資正在快速斷頭或停損退場，雖然短線劇烈修正，但屬於沉澱落底必要過程。")
+                        st.warning("⚡ **恐慌斷頭宣洩中**：融資正在快速斷頭或停損退場，雖然短線劇烈修正，但屬沉澱落底必要過程。")
                     else:
                         st.success("✅ **融資風險安全**：無融資死摳或連環斷頭之立即危險。")
 
@@ -294,10 +383,13 @@ with tab1:
                     else:
                         st.info("🔹 **軋空力道平緩**：券資比處於常態範圍，股價主要受現貨買賣盤支配。")
 
-                # 三、 綜合實戰操作策略建議
                 st.markdown("### 三、 綜合實戰操作策略建議")
-                if bias_ma20 > 15:
-                    st.error(f"🚨 **策略建議：【嚴禁追高】** 目前股價離 20 日月線高達 **{bias_ma20}%** 巨大正乖離。即使籌碼良好，隨時有技術面修正引力，建議等待拉回至乖離率 5%~8% 內再行切入。")
+                adr_drag = (adr_info is not None) and (adr_info["change_pct"] <= -2.0)
+
+                if adr_drag:
+                    st.error(f"🚨 **策略建議：【暫緩進場 / 美股 ADR 利空拖累】** 對應美股 ADR ({adr_info['adr_ticker']}) 隔夜重挫 **{adr_info['change_pct']}%**。建議靜待開盤賣壓消化完畢。")
+                elif bias_ma20 > 15:
+                    st.error(f"🚨 **策略建議：【嚴禁追高】** 目前股價離 20 日月線高達 **{bias_ma20}%** 巨大正乖離。建議等待拉回至乖離率 5%~8% 內再行切入。")
                 elif bias_ma20 > 0 and bias_ma20 <= 15:
                     if m_trend == "Down":
                         st.success("🎯 **策略建議：【分批逢低布局 / 多頭買點】** 股價站於月線之上且融資退場籌碼沉澱，配合量縮拉回是極佳的法人順勢買點。")
@@ -311,12 +403,10 @@ with tab1:
 
                 st.caption(f"🔄 儀表板自動更新中 (更新頻率: {refresh_rate}s) 最新同步時間：{datetime.datetime.now().strftime('%H:%M:%S')}")
 
-            # 執行即時與籌碼診斷區塊
-            render_realtime_section(ticker_symbol, df)
+            render_realtime_section(ticker_symbol, df, stock_code)
 
             st.markdown("---")
 
-            # 四、 歷史走勢與技術均線圖
             st.markdown("### 📈 歷史 K 線與中長期均線走勢圖 (每10分鐘後台更新)")
             ma5_val_h = round(df.iloc[-1]['MA5'], 2) if not pd.isna(df.iloc[-1]['MA5']) else "計算中"
             ma20_val_h = round(df.iloc[-1]['MA20'], 2) if not pd.isna(df.iloc[-1]['MA20']) else "計算中"
@@ -343,10 +433,14 @@ with tab2:
                     t_symbol = f"{code}.TW"
                     t_obj = yf.Ticker(t_symbol)
                     t_hist = t_obj.history(period="2d")
+                    
                     if t_hist.empty:
                         t_symbol = f"{code}.TWO"
                         t_obj = yf.Ticker(t_symbol)
                         t_hist = t_obj.history(period="2d")
+
+                    # 抓取存款與借款/公司債餘額
+                    cash_bal, debt_bal = get_financial_balances(t_symbol)
 
                     if not t_hist.empty:
                         curr_p = round(t_hist.iloc[-1]['Close'], 2)
@@ -360,15 +454,21 @@ with tab2:
                             "現價": f"${curr_p}",
                             "漲跌": f"{chg} ({chg_pct}%)",
                             "成交量": f"{vol // 1000:,} 張" if vol > 1000 else f"{vol} 股",
+                            "最近一期銀行存款餘額": cash_bal,
+                            "公司債/借款餘額": debt_bal,
                             "盤面狀態": "多頭攻勢" if chg > 0 else ("壓回整理" if chg < 0 else "平盤觀望")
                         })
                     else:
                         portfolio_results.append({
-                            "代碼": code, "現價": "N/A", "漲跌": "N/A", "成交量": "N/A", "盤面狀態": "無數據"
+                            "代碼": code, "現價": "N/A", "漲跌": "N/A", "成交量": "N/A",
+                            "最近一期銀行存款餘額": cash_bal, "公司債/借款餘額": debt_bal,
+                            "盤面狀態": "無數據"
                         })
-                except:
+                except Exception:
                     portfolio_results.append({
-                        "代碼": code, "現價": "Error", "漲跌": "Error", "成交量": "Error", "盤面狀態": "讀取失敗"
+                        "代碼": code, "現價": "Error", "漲跌": "Error", "成交量": "Error",
+                        "最近一期銀行存款餘額": "N/A", "公司債/借款餘額": "N/A",
+                        "盤面狀態": "讀取失敗"
                     })
 
             st.table(pd.DataFrame(portfolio_results))
