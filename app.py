@@ -87,18 +87,32 @@ if 'portfolio' not in st.session_state:
     st.session_state.portfolio = load_portfolio()
 
 # ==============================================================================
-# 財報數據檢索 Helper 函式 (銀行存款與公司債/借款餘額)
+# 財報數據檢索 Helper 函式 (銀行存款、公司債/借款餘額與最新累計 EPS)
 # ==============================================================================
 @st.cache_data(ttl=3600)  # 財報資料 1 小時快取，避免重複請求
-def get_financial_balances(ticker_str):
-    """取得最近一期銀行存款餘額與總借款/公司債餘額"""
-    cash_str, debt_str = "N/A", "N/A"
+def get_financial_metrics(ticker_str):
+    """取得最近一期銀行存款餘額、總借款/公司債餘額與最新累計 EPS"""
+    cash_str, debt_str, eps_str = "N/A", "N/A", "N/A"
     try:
         t_obj = yf.Ticker(ticker_str)
         info = t_obj.info
         
         cash = info.get('totalCash')
         debt = info.get('totalDebt')
+        
+        # 抓取 EPS (優先使用 trailingEps，若無則由季度損益表加總最近四季)
+        trailing_eps = info.get('trailingEps')
+        if trailing_eps is not None and not pd.isna(trailing_eps):
+            eps_str = f"${float(trailing_eps):.2f}"
+        else:
+            q_fin = t_obj.quarterly_financials
+            if q_fin is not None and not q_fin.empty:
+                for k in ['Basic EPS', 'Diluted EPS', 'Net Income Common Stockholders']:
+                    if k in q_fin.index:
+                        if 'EPS' in k:
+                            recent_eps = q_fin.loc[k].dropna().iloc[:4].sum()
+                            eps_str = f"${float(recent_eps):.2f}"
+                            break
         
         # 若 info 未直接回傳，由季度資產負債表進行備援抓取
         if cash is None or debt is None:
@@ -133,7 +147,7 @@ def get_financial_balances(ticker_str):
     except Exception:
         pass
 
-    return cash_str, debt_str
+    return cash_str, debt_str, eps_str
 
 # ==============================================================================
 # 美股 ADR 數據動態檢索函式
@@ -326,10 +340,11 @@ with tab1:
                     """, unsafe_allow_html=True)
 
                 st.markdown("### 一、 量價與融資籌碼指標對比表")
+                vol_label_str = "帶量" if v_trend == 'High' else "量縮"
                 summary_data = {
                     "觀察指標 / 項目": ["波段最高天量日", "前一交易日", "今日即時與籌碼趨勢"],
                     "股價位置": [f"${max_vol_price} 元", f"${prev_price} 元", f"${current_price} 元"],
-                    "成交量狀態": [f"{max_vol // 1000:,} 張 (天量)", f"{prev_volume // 1000:,} 張", f"{current_volume // 1000:,} 張 ({'帶量' if v_trend=='High' else '量縮'})"],
+                    "成交量狀態": [f"{max_vol // 1000:,} 張 (天量)", f"{prev_volume // 1000:,} 張", f"{current_volume // 1000:,} 張 ({vol_label_str})"],
                     "融資與籌碼解讀": [
                         f"爆出近期天量（{max_vol_date}），為多空主力劇烈換手或高檔出貨區。",
                         "前日量能基準點，作為今日多空交投熱度之對比對象。",
@@ -439,8 +454,8 @@ with tab2:
                         t_obj = yf.Ticker(t_symbol)
                         t_hist = t_obj.history(period="2d")
 
-                    # 抓取存款與借款/公司債餘額
-                    cash_bal, debt_bal = get_financial_balances(t_symbol)
+                    # 抓取存款、借款餘額與最新累計 EPS
+                    cash_bal, debt_bal, cum_eps = get_financial_metrics(t_symbol)
 
                     if not t_hist.empty:
                         curr_p = round(t_hist.iloc[-1]['Close'], 2)
@@ -454,6 +469,7 @@ with tab2:
                             "現價": f"${curr_p}",
                             "漲跌": f"{chg} ({chg_pct}%)",
                             "成交量": f"{vol // 1000:,} 張" if vol > 1000 else f"{vol} 股",
+                            "最新累計EPS": cum_eps,
                             "最近一期銀行存款餘額": cash_bal,
                             "公司債/借款餘額": debt_bal,
                             "盤面狀態": "多頭攻勢" if chg > 0 else ("壓回整理" if chg < 0 else "平盤觀望")
@@ -461,12 +477,14 @@ with tab2:
                     else:
                         portfolio_results.append({
                             "代碼": code, "現價": "N/A", "漲跌": "N/A", "成交量": "N/A",
+                            "最新累計EPS": cum_eps,
                             "最近一期銀行存款餘額": cash_bal, "公司債/借款餘額": debt_bal,
                             "盤面狀態": "無數據"
                         })
                 except Exception:
                     portfolio_results.append({
                         "代碼": code, "現價": "Error", "漲跌": "Error", "成交量": "Error",
+                        "最新累計EPS": "N/A",
                         "最近一期銀行存款餘額": "N/A", "公司債/借款餘額": "N/A",
                         "盤面狀態": "讀取失敗"
                     })
